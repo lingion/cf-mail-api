@@ -14,60 +14,36 @@
 <h1 align="center">cf-mail-api</h1>
 
 <p align="center">
-  A webhook-based disposable mailbox backend on <b>Cloudflare Workers + D1</b>.<br>
-  <b>Zero DNS, zero routing, zero real domain required.</b> Push mail in via HTTP, read it back via HTTP.
+  HTTP webhook mailbox backend on Cloudflare Workers + D1.<br>
+  Mail is deposited via <code>POST /api/inbound</code> and read back via the same API.
 </p>
 
 ---
 
-> **Keywords:** Cloudflare Workers, Cloudflare D1, webhook mailbox, disposable email, temporary mailbox, self-hosted mail backend, API-first, zero-config mail storage, MailHog alternative, dev mail capture
+## Overview
+
+`cf-mail-api` stores mail messages in a Cloudflare D1 database and exposes them over HTTP.
+
+The deposit path is one HTTP call: `POST /api/inbound`. There is no required DNS record, MX record, or real domain that can receive SMTP. The "mailbox address" (`xxx@mail.<your-domain>`) is a string identifier in D1; the domain part does not need to actually receive mail.
+
+The repository also includes:
+
+- An optional Cloudflare Email Routing integration that allows real SMTP delivery to be dispatched into the same worker.
+- An optional `FORWARD_TO_EMAIL` variable for forwarding copies of inbound mail to a second address.
+- An optional Resend-based send route on a third subdomain.
+
+These three are independent of the webhook path. Each is documented under [Optional Add-ons](#optional-add-ons).
 
 ---
 
-## What This Is
-
-`cf-mail-api` is a **stateless HTTP mail-capture backend** that lives entirely on Cloudflare's free tier.
-
-The core path is one HTTP call:
-
-```
-POST /api/inbound   →   write to D1   →   fetch back via GET
-```
-
-That's it. There is **no required** DNS record, MX record, Email Routing setup, real domain ownership, or mail server. The "mailbox address" (`xxx@mail.<your-domain>`) is just a string identifier in D1 — the domain part does not need to actually receive mail.
-
-This makes it useful as:
-
-| Use case | How |
-|---|---|
-| **Disposable inbox for signups** | Generate mailbox → register somewhere → poll `GET /api/emails?email=...` for the verification mail |
-| **Local dev mail capture** | Pipe your test framework's `mail()` calls (or any HTTP sender) into `POST /api/inbound` |
-| **MailHog / Mailpit replacement** | Same UX, but on managed CF infra — no local container to run |
-| **API-first mail store** | Any upstream service with an HTTP webhook can deposit mail here |
-| **Personal temp-mail backend** | Generate → use → discard |
-
-If you want real-world SMTP / Email Routing / forwarding on top of the same backend, see [Optional Add-ons](#optional-add-ons). But the webhook-only mode is the headline feature, not a fallback.
-
----
-
-## Before You Deploy — Read This First
-
-> **DO NOT** point this at anyone else's worker URL. **DO NOT** publish your deployed URL publicly. **DO NOT** use the default `*.workers.dev` URL as a shared service.
->
-> This project runs on Cloudflare's **free tier** (~100k requests/day). The moment someone else finds your endpoint, they will burn through your quota and **your own mailbox stops working**.
->
-> The author of this project **does not** publish a hosted demo. If you find one online claiming to be "the official cf-mail-api", it is **not** us — it is a phishing/abuse mirror. Always deploy your own.
-
----
-
-## What Is in This Repository
+## Repository Layout
 
 | Component | Purpose |
 |---|---|
-| `src/index.js` | Main worker — `POST /api/inbound` writer + mailbox query API |
+| `src/index.js` | Main worker — `POST /api/inbound` plus mailbox query API |
 | `src/send.js` | Optional outbound send route via Resend |
 | `schema.sql` | D1 schema (mailboxes, messages) |
-| `wrangler.toml` | Worker config — **replace placeholders before deploy** |
+| `wrangler.toml` | Worker config — placeholders must be replaced before deploy |
 | `cloudflare_mail_client.py` | Optional Python client |
 | `LICENSE` | GNU GPL-3.0 |
 | `README.md` | English (this file) |
@@ -81,13 +57,13 @@ If you want real-world SMTP / Email Routing / forwarding on top of the same back
 |---|---|
 | Runtime | Cloudflare Workers (V8 isolates) |
 | Storage | Cloudflare D1 (SQLite) |
-| Inbound | **HTTP webhook** (`POST /api/inbound`) — no DNS / MX required |
-| Inbound (optional) | Cloudflare Email Routing → Worker |
+| Inbound (core) | HTTP webhook |
+| Inbound (optional) | Cloudflare Email Routing |
 | Outbound (optional) | Resend HTTP API |
 | Auth | Bearer token / `x-api-key` / `?api_key=*** |
 | Client (optional) | Python 3 (`requests`) |
 
-No Node dependencies. No framework. No build step. Pure `wrangler deploy`.
+The worker has no Node dependencies and no build step. `wrangler deploy` is the only required command.
 
 ---
 
@@ -95,12 +71,12 @@ No Node dependencies. No framework. No build step. Pure `wrangler deploy`.
 
 ### 1. Prerequisites
 
-- A Cloudflare account (free tier is enough)
+- A Cloudflare account (free tier is sufficient)
 - `wrangler` CLI: `npm i -g wrangler`
 - Node.js 18+
-- **No domain required.** You can run the whole thing on the default `*.workers.dev` route for personal use.
+- No domain is required for the core webhook path. The default `*.workers.dev` route is sufficient for personal use.
 
-### 2. Clone & install
+### 2. Clone and install
 
 ```bash
 git clone https://github.com/lingion/cf-mail-api.git
@@ -118,10 +94,10 @@ wrangler d1 execute mail_api --remote --file=./schema.sql
 
 ### 4. Configure `wrangler.toml`
 
-The only mandatory thing is your `API_TOKEN`. Everything else in `[vars]` is optional — see [Optional Add-ons](#optional-add-ons).
+The only required environment variable is `API_TOKEN`. All other variables are optional and correspond to one of the add-ons.
 
 ```toml
-# Minimal config — replace <your-d1-database-id> and <your-api-token>:
+# Minimal configuration — replace <your-d1-database-id> and <your-api-token>:
 name = "cf-mail-api"
 main = "src/index.js"
 compatibility_date = "2026-03-22"
@@ -132,16 +108,10 @@ database_name = "mail_api"
 database_id = "<your-d1-database-id>"
 
 [vars]
-API_TOKEN = "<generate-with: openssl rand -hex 32>"
+API_TOKEN = "<openssl rand -hex 32>"
 ```
 
-To bind a custom domain (optional — only needed for the [Email Routing add-on](#optional-add-ons)):
-
-```toml
-[[routes]]
-pattern = "api.<your-domain>/*"
-zone_name = "<your-domain>"
-```
+Custom-domain routing is only needed if you intend to use the Email Routing add-on (see below).
 
 ### 5. Deploy
 
@@ -149,21 +119,19 @@ zone_name = "<your-domain>"
 wrangler deploy
 ```
 
-That's the entire core setup. You're done — start hitting the API.
-
 ### 6. Smoke test
 
 ```bash
-# 1. Health check
+# Health check
 curl https://<your-worker>.<your-subdomain>.workers.dev/health
 
-# 2. Generate a mailbox
+# Generate a mailbox (optional — the webhook accepts any address)
 curl -X POST https://<your-worker>.<your-subdomain>.workers.dev/api/generate-email \
   -H 'x-api-key: ***' \
   -H 'Content-Type: application/json' \
   -d '{"prefix":"task_demo01","label":"signup-test","ttl_hours":24}'
 
-# 3. Push a message in via the webhook
+# Deposit a message via the webhook
 curl -X POST https://<your-worker>.<your-subdomain>.workers.dev/api/inbound \
   -H 'x-api-key: ***' \
   -H 'Content-Type: application/json' \
@@ -174,37 +142,35 @@ curl -X POST https://<your-worker>.<your-subdomain>.workers.dev/api/inbound \
     "text":    "Click here to verify..."
   }'
 
-# 4. Read it back
+# Read it back
 curl 'https://<your-worker>.<your-subdomain>.workers.dev/api/emails?email=task_demo01@mail.<your-domain>' \
   -H 'x-api-key: ***'
 ```
-
-You now have a fully working disposable mailbox backend. No DNS, no routing, no real mail server involved.
 
 ---
 
 ## API Reference
 
-> All endpoints require auth via one of:
-> `Authorization: Bearer <API_TOKEN>` · `x-api-key: ***` · `?api_key=<API_TOKEN>`
+All endpoints require authentication via one of:
+- `Authorization: Bearer <API_TOKEN>`
+- `x-api-key: ***`
+- `?api_key=<API_TOKEN>`
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Health check |
-| POST | `/api/generate-email` | Create a new mailbox |
+| POST | `/api/generate-email` | Create a new mailbox record |
 | GET | `/api/mailboxes` | List all mailboxes |
 | GET | `/api/mailboxes/:id/messages` | List messages in a mailbox |
-| GET | `/api/mailboxes/:id/messages/:msg_id` | Fetch one message |
+| GET | `/api/mailboxes/:id/messages/:msg_id` | Fetch a single message |
 | GET | `/api/emails?email=...` | List messages for an address |
-| GET | `/api/email/:id` | Fetch one message by id |
-| DELETE | `/api/email/:id` | Delete one message |
+| GET | `/api/email/:id` | Fetch a single message by id |
+| DELETE | `/api/email/:id` | Delete a single message |
 | DELETE | `/api/emails/clear?email=...` | Clear all mail for an address |
-| GET | `/api/stats` | Counts (mailboxes, messages) |
-| **POST** | **`/api/inbound`** | **Webhook — deposit a message into D1** |
+| GET | `/api/stats` | Counts of mailboxes and messages |
+| POST | `/api/inbound` | Webhook — deposit a message into D1 |
 
-### POST /api/inbound (the core path)
-
-This is the only endpoint you actually need for the core use case. Any system that can do an HTTP POST can deposit mail here.
+### POST /api/inbound
 
 ```bash
 curl -X POST https://<your-worker>.<your-subdomain>.workers.dev/api/inbound \
@@ -219,20 +185,20 @@ curl -X POST https://<your-worker>.<your-subdomain>.workers.dev/api/inbound \
   }'
 ```
 
-Accepted fields (all optional except `to`):
+Request fields (only `to` is required):
 
 | Field | Aliases | Notes |
 |---|---|---|
-| `to` | `to_addr`, `recipient` | Target mailbox address (string or array — first element used) |
-| `from` | `from_addr` | Sender (string or array — first element used) |
-| `subject` | — | Mail subject |
-| `text` | `text_body`, `body` | Plain-text body |
-| `html` | `html_body` | HTML body |
-| `id` | `external_id` | Optional external message id for de-dup / correlation |
+| `to` | `to_addr`, `recipient` | Target mailbox address. String or array; first element is used. |
+| `from` | `from_addr` | Sender. String or array; first element is used. |
+| `subject` | — | Mail subject. |
+| `text` | `text_body`, `body` | Plain-text body. |
+| `html` | `html_body` | HTML body. |
+| `id` | `external_id` | Optional external message id for correlation. |
 
-If `to` is a mailbox that does not yet exist in D1, the worker auto-creates it. So you can deposit mail into any arbitrary address without calling `generate-email` first.
+If `to` does not match an existing mailbox in D1, the worker creates one. The webhook therefore accepts messages into any address, registered or not.
 
-### Generate a mailbox (optional)
+### POST /api/generate-email
 
 ```bash
 curl -X POST https://<your-worker>.<your-subdomain>.workers.dev/api/generate-email \
@@ -241,53 +207,55 @@ curl -X POST https://<your-worker>.<your-subdomain>.workers.dev/api/generate-ema
   -d '{"prefix":"task_demo01","label":"signup-test","ttl_hours":24}'
 ```
 
-| field | rule |
+| Field | Rule |
 |---|---|
-| `prefix` / `name` | optional, must match `^[a-z0-9_-]{6,40}$` if provided |
-| `label` | free-form tag |
-| `ttl_hours` | mailbox lifetime, default 24h |
+| `prefix` / `name` | Optional. Must match `^[a-z0-9_-]{6,40}$` when provided. |
+| `label` | Optional free-form tag. |
+| `ttl_hours` | Optional mailbox lifetime in hours. Defaults to 24. |
 
-This is purely a convenience helper for getting a tracked mailbox record. The webhook accepts mail into **any** address, registered or not.
+This endpoint creates a tracked mailbox record with metadata. It is not a prerequisite for receiving mail — the webhook accepts any address.
 
-### Read mail back
+### GET endpoints
 
 ```bash
-# All messages for an address
+# Messages for an address
 curl 'https://<your-worker>.<your-subdomain>.workers.dev/api/emails?email=task_demo01@mail.<your-domain>' \
   -H 'x-api-key: ***'
 
-# Single message
+# Single message by id
 curl 'https://<your-worker>.<your-subdomain>.workers.dev/api/email/<message_id>' \
   -H 'x-api-key: ***'
+
+# Mailboxes
+curl 'https://<your-worker>.<your-subdomain>.workers.dev/api/mailboxes' -H 'x-api-key: ***'
+
+# Stats
+curl 'https://<your-worker>.<your-subdomain>.workers.dev/api/stats' -H 'x-api-key: ***'
 ```
 
-### Delete / clear
+### DELETE endpoints
 
 ```bash
+# Delete a single message
 curl -X DELETE 'https://<your-worker>.<your-subdomain>.workers.dev/api/email/<message_id>' \
   -H 'x-api-key: ***'
 
+# Clear all mail for an address
 curl -X DELETE 'https://<your-worker>.<your-subdomain>.workers.dev/api/emails/clear?email=<addr>@mail.<your-domain>' \
   -H 'x-api-key: ***'
-```
-
-### Stats
-
-```bash
-curl 'https://<your-worker>.<your-subdomain>.workers.dev/api/stats' -H 'x-api-key: ***'
 ```
 
 ---
 
 ## Optional Add-ons
 
-The webhook core works without any of these. Add them only if you want them.
+The webhook path functions without any of these. Enable them only if needed.
 
-### Add-on A — Real SMTP / Email Routing
+### Add-on A — Real SMTP via Email Routing
 
-Bind a custom domain and enable Cloudflare Email Routing so the Worker also accepts mail that real SMTP servers deliver to `xxx@mail.<your-domain>`.
+Allows the worker to receive mail that real SMTP servers deliver to `xxx@mail.<your-domain>`.
 
-1. Add a domain to Cloudflare (DNS must be on CF).
+1. Add a domain to Cloudflare with DNS on CF.
 2. In `wrangler.toml`, add a route:
    ```toml
    [[routes]]
@@ -295,13 +263,11 @@ Bind a custom domain and enable Cloudflare Email Routing so the Worker also acce
    zone_name = "<your-domain>"
    ```
 3. Set `[vars] MAIL_DOMAIN = "mail.<your-domain>"`.
-4. In Cloudflare dashboard → your zone → **Email → Email Routing → Enable**, then add a catch-all route `*@mail.<your-domain>` → **Send to Worker** → `cf-mail-api`.
+4. In the Cloudflare dashboard for the zone: **Email → Email Routing → Enable**, then add a catch-all route `*@mail.<your-domain>` → **Send to Worker** → `cf-mail-api`.
 
-Mail delivered by real SMTP is dispatched to the worker by Cloudflare, written to D1 via the same path, and becomes queryable via the same API.
+Real SMTP messages are dispatched to the worker by Cloudflare and stored in D1 via the same path used by the webhook.
 
 ### Add-on B — Forward to a real inbox
-
-After mail lands in D1, optionally forward a copy to your real address (e.g. QQ / Gmail) so you see it without polling the API.
 
 In `wrangler.toml`:
 
@@ -310,9 +276,9 @@ In `wrangler.toml`:
 FORWARD_TO_EMAIL = "you@gmail.com"
 ```
 
-The Worker will POST every inbound message to a small forwarder (configure with whatever delivery you prefer — SMTP relay, Mailgun, Resend, etc.). `FORWARD_TO_EMAIL` itself is just the destination string; the worker reads it.
+The worker reads this variable and uses it as the destination for a secondary copy of each inbound message. Delivery of the copy is delegated to whatever forwarder is wired up in the worker code; this variable only specifies the address.
 
-### Add-on C — Send outbound mail (Resend)
+### Add-on C — Outbound send via Resend
 
 Add a third route `send.<your-domain>` and set a Resend API key:
 
@@ -333,43 +299,43 @@ curl -X POST https://send.<your-domain>/api/send \
   }'
 ```
 
-`from` must be a mailbox that already exists in your D1, and the domain must have a valid SPF/DKIM record for deliverability.
+`from` must reference a mailbox that exists in D1. The domain must have a valid SPF/DKIM record for deliverability.
 
 ---
 
-## Configuration Cheatsheet
+## Configuration Reference
 
-| Env var | Required? | Purpose |
+| Variable | Required | Purpose |
 |---|---|---|
-| `API_TOKEN` | **yes** | Bearer token for the API. Generate with `openssl rand -hex 32`. |
-| `MAIL_DOMAIN` | no | The display domain used when generating mailbox addresses (e.g. `mail.<your-domain>`). Cosmetic — mail routing still uses the webhook. |
-| `FORWARD_TO_EMAIL` | no | Where to forward inbound mail copies (add-on B). |
-| `RESEND_API_KEY` | no | Outbound provider key (add-on C). |
+| `API_TOKEN` | yes | Bearer token for the API. Generate with `openssl rand -hex 32`. |
+| `MAIL_DOMAIN` | no | Display domain used in generated mailbox addresses. Not used for routing. |
+| `FORWARD_TO_EMAIL` | no | Destination address for forwarded copies. Add-on B. |
+| `RESEND_API_KEY` | no | Outbound provider key. Add-on C. |
 
 ---
 
-## Cost & Quota
+## Cost and Quota
 
-This project is designed to run entirely on Cloudflare's **free tier**:
+The worker is designed to run entirely within Cloudflare's free tier:
 
 | Resource | Free tier |
 |---|---|
 | Workers requests | 100,000 / day |
 | D1 reads | 5,000,000 / day |
 | D1 writes | 100,000 / day |
-| Email Routing messages | 100 / day (per destination, add-on A only) |
+| Email Routing messages | 100 / day per destination (Add-on A only) |
 
-**Do not** expose this service publicly. Every external request consumes your quota. If you need more headroom, put an auth layer in front (a per-user token, IP allowlist, or rate limit) — the auth flag is already there, just don't share the token.
+The auth flag is in place to prevent unauthenticated use, but it does not protect against a token being leaked or shared. Public exposure of the worker URL will exhaust the free-tier quota and render the deployment unusable for its owner.
 
 ---
 
 ## Repository Rule
 
-`lingion/cf-mail-api` is the **only mainline** source of truth for this project. Any collaboration mirror or fork (e.g. for testing) should not replace this repo as the primary landing page. All meaningful project evolution lands here.
+`lingion/cf-mail-api` is the only mainline source of truth for this project. Mirrors and forks should not be treated as the primary landing page. All development lands here.
 
 ---
 
-## Docs
+## Documentation
 
 - `README.md` — English (this file)
 - `README.zh.md` — 中文文档
@@ -382,10 +348,10 @@ This project is designed to run entirely on Cloudflare's **free tier**:
 
 GNU General Public License v3.0. See [LICENSE](./LICENSE).
 
-In short: you can use, modify, and redistribute this freely — including commercially — but **any derivative work must also be GPL-3.0** and **must keep the copyright notice**. There is no warranty.
+You may use, modify, and redistribute this work, including for commercial purposes, provided that derivative works are also licensed under GPL-3.0 and the copyright notice is preserved. No warranty is provided.
 
 ---
 
 ## Contributing
 
-PRs welcome at <https://github.com/lingion/cf-mail-api>. By contributing you agree your contribution is also licensed under GPL-3.0.
+PRs are accepted at <https://github.com/lingion/cf-mail-api>. By contributing, you agree that your contribution is licensed under GPL-3.0.
