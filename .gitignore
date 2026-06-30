@@ -1,0 +1,14 @@
+# Secrets — NEVER commit
+api-token.txt
+.dev.vars
+*.local
+.env
+.env.*
+
+# Wrangler state
+.wrangler/
+
+# Node
+node_modules/
+*.log
+.DS_Store

@@ -1,0 +1,35 @@
+name = "cf-mail-api"
+main = "src/index.js"
+compatibility_date = "2026-03-22"
+
+# ============================================================
+# IMPORTANT — DEPLOY ON YOUR OWN DOMAIN, NOT THE DEFAULT!
+# ============================================================
+# Replace every <your-domain> placeholder below with your own
+# Cloudflare-managed domain (the zone must be on the same CF account).
+# DO NOT deploy to someone else's worker URL — they will steal
+# your D1 quota and you will be rate-limited out of your own inbox.
+# ============================================================
+
+[[routes]]
+pattern = "api.<your-domain>/*"
+zone_name = "<your-domain>"
+
+[[routes]]
+pattern = "send.<your-domain>/*"
+zone_name = "<your-domain>"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mail_api"
+database_id = "<your-d1-database-id>"
+
+[vars]
+# Mailbox domain users send mail TO (configure Email Routing on this subdomain)
+MAIL_DOMAIN = "mail.<your-domain>"
+
+# Bearer token for the public API (generate your own: `openssl rand -hex 32`)
+API_TOKEN = "<your-api-token>"
+
+# Optional: forward every inbound email to your real mailbox
+FORWARD_TO_EMAIL = "<your-real-inbox@example.com>"
